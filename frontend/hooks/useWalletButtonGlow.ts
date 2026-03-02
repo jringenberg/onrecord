@@ -7,9 +7,9 @@ export const CONFIG = {
   /** Safety fallback max distance (px) if viewport math fails; normal path uses dynamic viewport reach. */
   proximityFallbackMaxDistance: 4500,
   /** Distance (px) where near-field ramp starts becoming obvious. */
-  proximityNearDistance: 180,
+  proximityNearDistance: 360,
   /** Distance (px) where ramp becomes aggressively exponential-feeling. */
-  proximityHotDistance: 54,
+  proximityHotDistance: 108,
   /** Relative intensity (0..1) at proximityNearDistance before cap scaling. */
   proximityNearLevel: 0.18,
   /** Relative intensity (0..1) at proximityHotDistance before cap scaling. */

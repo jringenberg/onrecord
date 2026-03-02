@@ -144,6 +144,8 @@ export function HomeContent({ initialSort = 'popular', filterValue }: HomeConten
   const [progress, setProgress] = useState(0);
   const [progressMessage, setProgressMessage] = useState('');
   const [feedLoading, setFeedLoading] = useState(true);
+  const [feedError, setFeedError] = useState<string | null>(null);
+  const lastFeedErrorTime = useRef<number>(0);
   const [beliefs, setBeliefs] = useState<
     Array<{
       id: string;
@@ -203,81 +205,98 @@ export function HomeContent({ initialSort = 'popular', filterValue }: HomeConten
   // Track which belief IDs belong to a filtered account view
   const [accountBeliefIds, setAccountBeliefIds] = useState<Set<string>>(new Set());
 
-  useEffect(() => {
+  const fetchFeedBeliefs = useCallback(async () => {
     setFeedLoading(true);
-    async function fetchBeliefs() {
-      try {
-        const fetchedBeliefs = await getBeliefs();
-        setBeliefs(fetchedBeliefs);
-
-        // For 'account' sort, also fetch that address's stakes and merge beliefs
-        if (initialSort === 'account' && filterValue) {
-          const accountStakes = await getAccountStakes(filterValue);
-          const accountBeliefs = accountStakes.map(s => s.belief);
-          const accountIds = new Set(accountBeliefs.map(b => b.id));
-          setAccountBeliefIds(accountIds);
-
-          // Merge any beliefs not already in the main list
-          const existingIds = new Set(fetchedBeliefs.map(b => b.id));
-          const newBeliefs = accountBeliefs.filter(b => !existingIds.has(b.id));
-          if (newBeliefs.length > 0) {
-            setBeliefs(prev => [...prev, ...newBeliefs]);
-          }
-        }
-
-        // For 'belief' sort, ensure the specific belief is in the list
-        if (initialSort === 'belief' && filterValue) {
-          const existingIds = new Set(fetchedBeliefs.map(b => b.id));
-          if (!existingIds.has(filterValue)) {
-            const singleBelief = await getBelief(filterValue);
-            if (singleBelief) {
-              setBeliefs(prev => [...prev, singleBelief]);
-            }
-          }
-        }
-
-        // Eagerly fetch stakes for beliefs with a zero/missing attester so we can
-        // display the first staker as a fallback without waiting for detail open.
-        const zeroAttesterBeliefs = fetchedBeliefs.filter(b => isZeroOrEmpty(b.attester));
-        if (zeroAttesterBeliefs.length > 0) {
-          const stakeFetches = await Promise.all(
-            zeroAttesterBeliefs.map(async (b) => {
-              const stakes = await getBeliefStakes(b.id);
-              return {
-                id: b.id,
-                stakes: stakes.map(s => ({
-                  staker: s.staker,
-                  amount: s.amount,
-                  timestamp: s.stakedAt,
-                  transactionHash: s.transactionHash,
-                })),
-              };
-            })
-          );
-          setBeliefStakes(prev => ({
-            ...prev,
-            ...Object.fromEntries(stakeFetches.map(({ id, stakes }) => [id, stakes])),
-          }));
-        }
-      } catch (error) {
-        console.error('Error fetching beliefs:', error);
-      } finally {
-        setFeedLoading(false);
+    setFeedError(null);
+    try {
+      const result = await getBeliefs();
+      if (!result.ok) {
+        setFeedError(result.error);
+        lastFeedErrorTime.current = Date.now();
+        setBeliefs([]);
+        return;
       }
+      const fetchedBeliefs = result.beliefs;
+      setBeliefs(fetchedBeliefs);
+
+      // For 'account' sort, also fetch that address's stakes and merge beliefs
+      if (initialSort === 'account' && filterValue) {
+        const accountStakes = await getAccountStakes(filterValue);
+        const accountBeliefs = accountStakes.map(s => s.belief);
+        const accountIds = new Set(accountBeliefs.map(b => b.id));
+        setAccountBeliefIds(accountIds);
+
+        const existingIds = new Set(fetchedBeliefs.map(b => b.id));
+        const newBeliefs = accountBeliefs.filter(b => !existingIds.has(b.id));
+        if (newBeliefs.length > 0) {
+          setBeliefs(prev => [...prev, ...newBeliefs]);
+        }
+      }
+
+      // For 'belief' sort, ensure the specific belief is in the list
+      if (initialSort === 'belief' && filterValue) {
+        const existingIds = new Set(fetchedBeliefs.map(b => b.id));
+        if (!existingIds.has(filterValue)) {
+          const singleBelief = await getBelief(filterValue);
+          if (singleBelief) {
+            setBeliefs(prev => [...prev, singleBelief]);
+          }
+        }
+      }
+
+      // Eagerly fetch stakes for beliefs with a zero/missing attester
+      const zeroAttesterBeliefs = fetchedBeliefs.filter(b => isZeroOrEmpty(b.attester));
+      if (zeroAttesterBeliefs.length > 0) {
+        const stakeFetches = await Promise.all(
+          zeroAttesterBeliefs.map(async (b) => {
+            const stakes = await getBeliefStakes(b.id);
+            return {
+              id: b.id,
+              stakes: stakes.map(s => ({
+                staker: s.staker,
+                amount: s.amount,
+                timestamp: s.stakedAt,
+                transactionHash: s.transactionHash,
+              })),
+            };
+          })
+        );
+        setBeliefStakes(prev => ({
+          ...prev,
+          ...Object.fromEntries(stakeFetches.map(({ id, stakes }) => [id, stakes])),
+        }));
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to load beliefs';
+      setFeedError(message);
+      lastFeedErrorTime.current = Date.now();
+      setBeliefs([]);
+    } finally {
+      setFeedLoading(false);
     }
+  }, [initialSort, filterValue]);
 
-    fetchBeliefs();
+  useEffect(() => {
+    fetchFeedBeliefs();
 
-    // Re-fetch when user returns to tab (covers "went away, came back" without constant polling).
-    // Skip if a transaction just completed (60s cooldown) to protect optimistic updates.
+    // Re-fetch when user returns to tab. Skip if last fetch errored within 30s to avoid hammering a dead endpoint.
     function handleVisibility() {
       if (document.hidden) return;
       if (Date.now() - lastTxTime.current < 60_000) return;
-      getBeliefs().then(setBeliefs).catch(() => {});
+      if (Date.now() - lastFeedErrorTime.current < 30_000) return;
+      getBeliefs().then((r) => {
+        if (r.ok) {
+          setBeliefs(r.beliefs);
+          setFeedError(null);
+        } else {
+          lastFeedErrorTime.current = Date.now();
+          setFeedError(r.error);
+        }
+      }).catch(() => {});
     }
     document.addEventListener('visibilitychange', handleVisibility);
     return () => document.removeEventListener('visibilitychange', handleVisibility);
-  }, [initialSort, filterValue]);
+  }, [fetchFeedBeliefs]);
 
   // Reset to "popular" if user disconnects while on "wallet" filter
   useEffect(() => {
@@ -593,21 +612,25 @@ export function HomeContent({ initialSort = 'popular', filterValue }: HomeConten
         setProgress(75 + (25 / maxAttempts) * (attempt + 1));
 
         try {
-          const latestBeliefs = await getBeliefs();
-          const updated = latestBeliefs.find((b) => b.id === attestationUID);
-          if (BigInt(updated?.totalStaked || '0') > priorTotalStaked) {
-            setBeliefs(latestBeliefs);
-            setSortOption('recent');
-            synced = true;
-            break;
+          const res = await getBeliefs();
+          if (res.ok) {
+            const updated = res.beliefs.find((b) => b.id === attestationUID);
+            if (BigInt(updated?.totalStaked || '0') > priorTotalStaked) {
+              setBeliefs(res.beliefs);
+              setSortOption('recent');
+              synced = true;
+              break;
+            }
           }
         } catch { /* keep polling */ }
       }
 
       if (!synced) {
-        const fetchedBeliefs = await getBeliefs();
-        setBeliefs(fetchedBeliefs);
-        setSortOption('recent');
+        const res = await getBeliefs();
+        if (res.ok) {
+          setBeliefs(res.beliefs);
+          setSortOption('recent');
+        }
       }
 
       setProgress(100);
@@ -708,13 +731,15 @@ export function HomeContent({ initialSort = 'popular', filterValue }: HomeConten
         setProgress(75 + (25 / maxAttempts) * (attempt + 1));
 
         try {
-          const latestBeliefs = await getBeliefs();
-          const updated = latestBeliefs.find((b) => b.id === attestationUID);
-          if (BigInt(updated?.totalStaked || '0') < priorTotalStaked) {
-            setBeliefs(latestBeliefs);
-            setSortOption('recent');
-            synced = true;
-            break;
+          const res = await getBeliefs();
+          if (res.ok) {
+            const updated = res.beliefs.find((b) => b.id === attestationUID);
+            if (BigInt(updated?.totalStaked || '0') < priorTotalStaked) {
+              setBeliefs(res.beliefs);
+              setSortOption('recent');
+              synced = true;
+              break;
+            }
           }
         } catch {
           // keep polling
@@ -722,9 +747,11 @@ export function HomeContent({ initialSort = 'popular', filterValue }: HomeConten
       }
 
       if (!synced) {
-        const fetchedBeliefs = await getBeliefs();
-        setBeliefs(fetchedBeliefs);
-        setSortOption('recent');
+        const res = await getBeliefs();
+        if (res.ok) {
+          setBeliefs(res.beliefs);
+          setSortOption('recent');
+        }
       }
 
       setProgress(100);
@@ -850,21 +877,23 @@ export function HomeContent({ initialSort = 'popular', filterValue }: HomeConten
         while (attempts < maxAttempts && !found) {
           await new Promise((resolve) => setTimeout(resolve, 2000));
           try {
-            const latestBeliefs = await getBeliefs();
-            found = latestBeliefs.some(
-              (b) => b.id === attestationUID && BigInt(b.totalStaked || '0') > 0n
-            );
-            if (found) {
-              setProgress(100);
-              setProgressMessage('Belief created!');
-              lastTxTime.current = Date.now();
-              setBeliefs(latestBeliefs);
-              setSortOption('recent');
-              setTimeout(() => {
-                setProgress(0);
-                setProgressMessage('');
-              }, 2000);
-              break;
+            const res = await getBeliefs();
+            if (res.ok) {
+              found = res.beliefs.some(
+                (b) => b.id === attestationUID && BigInt(b.totalStaked || '0') > 0n
+              );
+              if (found) {
+                setProgress(100);
+                setProgressMessage('Belief created!');
+                lastTxTime.current = Date.now();
+                setBeliefs(res.beliefs);
+                setSortOption('recent');
+                setTimeout(() => {
+                  setProgress(0);
+                  setProgressMessage('');
+                }, 2000);
+                break;
+              }
             }
           } catch (e) {
             console.error('Error polling subgraph:', e);
@@ -937,21 +966,22 @@ export function HomeContent({ initialSort = 'popular', filterValue }: HomeConten
         await new Promise((resolve) => setTimeout(resolve, 2000));
 
         try {
-          const latestBeliefs = await getBeliefs();
-          found = latestBeliefs.some((b) => b.id === attestationUID && BigInt(b.totalStaked || '0') > 0n);
-
-          if (found) {
-            setProgress(100);
-            setProgressMessage('Belief created!');
-            lastTxTime.current = Date.now();
-            setBeliefs(latestBeliefs);
-            // Switch to Recent Beliefs to show the new belief at the top
-            setSortOption('recent');
-            setTimeout(() => {
-              setProgress(0);
-              setProgressMessage('');
-            }, 2000);
-            break;
+          const res = await getBeliefs();
+          if (res.ok) {
+            found = res.beliefs.some((b) => b.id === attestationUID && BigInt(b.totalStaked || '0') > 0n);
+            if (found) {
+              setProgress(100);
+              setProgressMessage('Belief created!');
+              lastTxTime.current = Date.now();
+              setBeliefs(res.beliefs);
+              // Switch to Recent Beliefs to show the new belief at the top
+              setSortOption('recent');
+              setTimeout(() => {
+                setProgress(0);
+                setProgressMessage('');
+              }, 2000);
+              break;
+            }
           }
         } catch (error) {
           console.error('Error polling subgraph:', error);
@@ -978,14 +1008,15 @@ export function HomeContent({ initialSort = 'popular', filterValue }: HomeConten
 
   return (
     <>
-      <button 
-        className={`dollar-button nav-fixed nav-left ${showFaucetModal ? 'inverted' : ''}`}
-        onClick={toggleFaucetModal}
-        title="Get test funds"
-      >
-        <span className="dollar-glyph" aria-hidden="true">$</span>
-        <span className="dollar-beta" aria-hidden="true">BETA</span>
-      </button>
+      <div className="nav-fixed nav-left">
+        <button
+          className={`dollar-button ${showFaucetModal ? 'inverted' : ''}`}
+          onClick={toggleFaucetModal}
+          title="Get test funds"
+        >
+          <span className="dollar-glyph" aria-hidden="true">$</span>
+        </button>
+      </div>
       <div className="nav-fixed nav-right">
         <ConnectButton />
       </div>
@@ -1161,14 +1192,32 @@ export function HomeContent({ initialSort = 'popular', filterValue }: HomeConten
           </div>
         {feedLoading ? (
           <div className="feed-loading" aria-live="polite" aria-busy="true">
-            <span className="feed-loading-ellipsis" aria-hidden="true">
-              <span>.</span><span>.</span><span>.</span>
-            </span>
+            <p className="feed-loading-message">Loading beliefs…</p>
+          </div>
+        ) : feedError ? (
+          <div className="feed-error" role="alert">
+            <p className="feed-error-message">
+              Beliefs are temporarily unavailable. The indexer may be experiencing issues — check back shortly.
+            </p>
+            <button
+              type="button"
+              className="btn-cta feed-error-retry"
+              onClick={() => fetchFeedBeliefs()}
+            >
+              Retry
+            </button>
           </div>
         ) : (
         <section className="beliefs">
           <ul className="beliefs-list">
-            {displayedBeliefs.map((beliefItem) => {
+            {displayedBeliefs.length === 0 ? (
+              <li className="empty-state">
+                <p>No beliefs to show yet.</p>
+                {sortOption !== 'popular' && sortOption !== 'recent' && (
+                  <p>Try &quot;Popular&quot; or &quot;Recent&quot; to see all staked beliefs.</p>
+                )}
+              </li>
+            ) : displayedBeliefs.map((beliefItem) => {
               const totalStaked = BigInt(beliefItem.totalStaked || '0');
               const dollars = Number(totalStaked) / 1_000_000;
               const text = beliefItem.beliefText || '[No belief text]';

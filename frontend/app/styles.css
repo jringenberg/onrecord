@@ -179,6 +179,9 @@ ul {
 
 .nav-left {
   left: 1rem;
+  height: 2.625rem;
+  display: flex;
+  align-items: center;
 }
 
 .nav-right {
@@ -695,25 +698,28 @@ ul {
   padding: 2rem 0;
 }
 
-.feed-loading-ellipsis {
+.feed-loading-message {
+  margin: 0;
   font-family: 'Times New Roman', Times, serif;
-  font-size: 1.5rem;
-  letter-spacing: 0.1em;
+  font-size: 1.2rem;
+  line-height: 1.8rem;
   color: var(--color-black);
-  opacity: 0.5;
 }
 
-.feed-loading-ellipsis span {
-  animation: feed-loading-dot 1.4s ease-in-out infinite both;
+/* Feed error state — subgraph/indexer unavailable */
+.feed-error {
+  padding: 2rem 0;
+  text-align: center;
 }
-
-.feed-loading-ellipsis span:nth-child(1) { animation-delay: 0s; }
-.feed-loading-ellipsis span:nth-child(2) { animation-delay: 0.2s; }
-.feed-loading-ellipsis span:nth-child(3) { animation-delay: 0.4s; }
-
-@keyframes feed-loading-dot {
-  0%, 60%, 100% { opacity: 0.25; }
-  30% { opacity: 1; }
+.feed-error-message {
+  margin: 0 0 1rem;
+  max-width: 28em;
+  margin-left: auto;
+  margin-right: auto;
+  opacity: 0.85;
+}
+.feed-error-retry {
+  margin-top: 0.5rem;
 }
 
 /* Beliefs Section */

@@ -10,13 +10,31 @@ export type Belief = {
   lastStakedAt: string;
 };
 
+/** Result of getBeliefs: success with data, or failure with a message (avoids ambiguous empty array on error). */
+export type GetBeliefsResult =
+  | { ok: true; beliefs: Belief[] }
+  | { ok: false; error: string };
+
+const SUBGRAPH_TIMEOUT_MS = 15_000;
+
 async function subgraphFetch(query: string, variables?: Record<string, unknown>) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), SUBGRAPH_TIMEOUT_MS);
+
   const response = await fetch(SUBGRAPH_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     cache: 'no-store',
     body: JSON.stringify({ query, variables }),
+    signal: controller.signal,
   });
+
+  clearTimeout(timeoutId);
+
+  if (!response.ok) {
+    throw new Error(`Subgraph returned ${response.status}`);
+  }
+
   const json = await response.json();
   if (json.errors) {
     console.error('[subgraph] errors:', json.errors);
@@ -39,12 +57,13 @@ export type Stake = {
 };
 
 /**
- * Fetch all beliefs, sorted by total staked (descending)
+ * Fetch all beliefs, sorted by total staked (descending).
+ * Returns a result object so callers can distinguish success (possibly empty) from network/API errors.
  */
-export async function getBeliefs(): Promise<Belief[]> {
+export async function getBeliefs(): Promise<GetBeliefsResult> {
   if (!SUBGRAPH_URL) {
     console.warn('SUBGRAPH_URL not configured');
-    return [];
+    return { ok: false, error: 'Subgraph not configured' };
   }
 
   const query = `
@@ -64,10 +83,20 @@ export async function getBeliefs(): Promise<Belief[]> {
 
   try {
     const json = await subgraphFetch(query);
-    return json.data?.beliefs || [];
+    if (json.errors?.length) {
+      const msg = json.errors[0]?.message ?? 'GraphQL errors';
+      console.error('[subgraph] getBeliefs errors:', json.errors);
+      return { ok: false, error: msg };
+    }
+    const beliefs = json.data?.beliefs ?? [];
+    return { ok: true, beliefs };
   } catch (error) {
+    let message = 'Failed to fetch';
+    if (error instanceof Error) {
+      message = error.name === 'AbortError' ? 'Request timed out' : error.message;
+    }
     console.error('Error fetching beliefs:', error);
-    return [];
+    return { ok: false, error: message };
   }
 }
 
